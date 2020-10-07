@@ -1,706 +1,209 @@
 #=================================================
-# https://github.com/P3TERX/Actions-OpenWrt
-# Description: Build OpenWrt using GitHub Actions
-# Lisence: MIT
-# Author: P3TERX (for direct-build job)
-# Blog: https://p3terx.com
-#=================================================
-
-#=================================================
 # https://github.com/tete1030/openwrt-fastbuild-actions
 # Description: FAST building OpenWrt with Github Actions and Docker!
 # Lisence: MIT
-# Author: Texot (for docker-* jobs)
+# Author: Texot
 #=================================================
 
-# If you want to tweak the options, please be sure you understand them.
-# 如果你想更改参数，确保在理解它们的前提下进行
 env:
-  # Specify here the name and tag you want to use for the builders
-  # 在这里自定义你想使用的Builder名和默认Tag
-  BUILDER_NAME: openwrt_x86_64
-  BUILDER_TAG: latest
-  # Specify here the OpenWrt Repo URL and Branch
-  # 在这里指定你的OpenWrt的Repo URL和Branch
-  REPO_URL: https://github.com/coolsnowwolf/lede
-  REPO_BRANCH: master
-  # Specify here your config file
-  # 在这里指定你的配置文件名
-  CONFIG_FILE: 'config.diff'
-  # Leave it empty if you are using the default Docker Hub
-  # 如果你想使用默认的Docker Hub，此处留空
-  DK_REGISTRY: ''
   # DO NOT CHANGE the following here, set them only in forked repo's Settings->Secrets page
+  # You don't need to set docker_registry if you are using the default Docker Hub
   # 安全起见以下参数请不要在此更改，在你Fork的repo中，Settings->Secrets页面更改
+  # 如果你想使用默认的Docker Hub，你不需要在secrets页面设置docker_registry
+  DK_REGISTRY: ${{secrets.docker_registry}}
   DK_USERNAME: ${{secrets.docker_username}}
   DK_PASSWORD: ${{secrets.docker_password}}
   SLACK_WEBHOOK_URL: ${{secrets.SLACK_WEBHOOK_URL}}
-  # Not recommended to change unless you understand how it is used
-  # 以下参数不推荐修改
-  DK_CONTEXT: .
+  TMATE_ENCRYPT_PASSWORD: ${{secrets.TMATE_ENCRYPT_PASSWORD}}
 
 name: Build OpenWrt
 
 on:
-  release:
-    types: [published]
   deployment:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Target to build'
+        required: true
+        default: 'all'
+      options:
+        description: 'Options in JSON'
+        required: false
   repository_dispatch:
   push:
-    paths-ignore:
-    - imgs
-    - README.md
-    - LICENSE
-    - .dockerignore
-#  schedule:
-#    - cron: 0 8 * * 5
-#  watch:
-#    types: [started]
+    paths:
+    - 'user/**'
+  # # For 'schedule', see examples in: https://crontab.guru/examples.html
+  # #     e.g. every sunday midnight: '0 0 * * 0' every midnight: '0 0 * * *'
+  # schedule:
+  #   - cron: '0 0 * * 0'
+  # watch:
+  #   types: [started]
 
 jobs:
-  docker-build:
+  build:
     runs-on: ubuntu-18.04
+    # For `github.event`'s structure, see: https://developer.github.com/v3/activity/events/types/
+    # Do not modify the trigger methods here, customize them in the `on` section
     if: |
-      github.event_name == 'release' || (
-        github.event_name == 'repository_dispatch' && 
-        github.event.action == 'docker-build'
-      ) || (
-        github.event_name == 'deployment' && 
-        github.event.deployment.task == 'docker-build'
-      )
-    name: ${{matrix.title}}
+      github.event_name == 'push'
+      || github.event_name == 'workflow_dispatch'
+      || github.event_name == 'repository_dispatch'
+      || github.event_name == 'deployment'
+      || (github.event_name == 'watch' && github.event.action == 'started' && github.event.repository.owner.id == github.event.sender.id)
+      || github.event_name == 'schedule'
+    name: ${{matrix.title}} ${{matrix.target}}
     strategy:
-      fail-fast: true
-      matrix: 
-        mode: [normal, test]
+      fail-fast: false
+      matrix:
+        mode:
+          - normal
+          - test
+        # ########### Add your target name below ###########
+        # E.g. target: [x86_64, wdr4310v1]
+        target: [x86_64, wdr4310v1, k2p]
         include:
         - mode: normal
-          title: docker-build
+          title: Build
         - mode: test
-          title: test-docker-build
+          title: Fast check
     env:
-      # Not recommended to change as they are already in optimal condition
-      # 不推荐修改，已处在最优状态
-      # Using docker-container driver because it allows full exporting of cache.
-      # However, its file copying process can be tricky and slow.
-      # If using docker as driver, the rebuilding will largely slow down.
-      # 使用docker-container是因为它允许完全导出缓存，加速下一次构建过程，然而它会让文件拷贝麻烦且缓慢
-      # 如果使用docker作为driver，重建过程会变得非常缓慢
-      DK_BUILDX_DRIVER: docker-container
-      DK_DOCKERFILE: Dockerfile
-      BUILD_ARGS: 'REPO_URL REPO_BRANCH CONFIG_FILE'
+      HOST_WORK_DIR: ${{github.workspace}}
+      BUILD_MODE: ${{matrix.mode}}
+      BUILD_TARGET: ${{matrix.target}}
 
     steps:
     - name: Checkout
-      uses: actions/checkout@master
-
-    - name: Init test env
-      if: matrix.mode == 'test'
-      run: |
-        echo "::set-env name=DK_DOCKERFILE::tests/${DK_DOCKERFILE}"
-        echo "::set-env name=BUILDER_TAG::test-${BUILDER_TAG}"
-        echo "::set-env name=TEST::1"
+      uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
 
     - name: Init build env
-      run: |
-        echo "::set-env name=IMAGE_NAME::${DK_USERNAME}/${BUILDER_NAME}"
-        echo "::set-env name=IMAGE_TAG::${BUILDER_TAG}"
-        scripts/cleanup.sh
+      run: scripts/cisteps/build-openwrt/01-init_env.sh
+
+    - name: Check if skip this job
+      run: scripts/cisteps/build-openwrt/02-check_target.sh
 
     - name: Set up Docker Buildx
       id: buildx
-      uses: crazy-max/ghaction-docker-buildx@v1
+      if: env.SKIP_TARGET == '0'
+      uses: docker/setup-buildx-action@v1
       with:
         version: latest
 
+    - name: Clean up for extra space
+      if: env.SKIP_TARGET == '0' && env.TEST != '1'
+      run: scripts/cisteps/build-openwrt/03-clean_up.sh
+
     - name: Configure docker
-      run: |
-        . docker.sh
-        configure_docker
-        login_to_registry
+      if: env.SKIP_TARGET == '0'
+      run: scripts/cisteps/build-openwrt/04-configure_docker.sh
 
-    - name: Initialize environment
-      run: |
-        . docker.sh
-        build_image init-env
-        echo "::set-env name=STATE_LAST_BUILD_STAGE::init-env"
+    - name: Check status of builders
+      if: env.SKIP_TARGET == '0'
+      run: scripts/cisteps/build-openwrt/05-check_builders.sh
 
-    - name: Clone all source code
-      run: |
-        . docker.sh
-        build_image clone
-        echo "::set-env name=STATE_LAST_BUILD_STAGE::clone"
-
-    # Allow intermediate customization
-    - name: SSH connection to Actions
-      if: github.event.client_payload.debug == true || github.event.deployment.payload.debug == true
+    - name: '[Debug] Wait for SSH connection (timeout 5min)'
+      if: env.SKIP_TARGET == '0' && env.OPT_DEBUG == '1' && env.TEST != '1'
       env:
         TIMEOUT_MIN: 5
-      uses: tete1030/debugger-action@my
+      uses: tete1030/safe-debugger-action@dev
 
-    - name: Load custom configuration
-      run: |
-        . docker.sh
-        build_image custom
-        echo "::set-env name=STATE_LAST_BUILD_STAGE::custom"
+    - name: Get builder
+      if: env.SKIP_TARGET == '0'
+      run: scripts/cisteps/build-openwrt/06-get_builder.sh
 
-    - name: Download package
-      run: |
-        . docker.sh
-        build_image download
-        echo "::set-env name=STATE_LAST_BUILD_STAGE::download"
+    - name: Clone/update OpenWrt
+      if: env.SKIP_TARGET == '0'
+      run: scripts/cisteps/build-openwrt/07-download_openwrt.sh
 
-    - name: Print disk space size
+    - name: Apply customizations
+      if: env.SKIP_TARGET == '0'
+      run: scripts/cisteps/build-openwrt/08-customize.sh
+
+    # Allow intermediate customization
+    - name: '[Debug/Menuconfig] Wait for SSH connection (timeout 10min)'
+      if: env.SKIP_TARGET == '0' && env.OPT_DEBUG == '1' && env.TEST != '1'
+      env:
+        TMATE_DOCKER_CONTAINER: ${{env.BUILDER_CONTAINER_ID}}
+        TIMEOUT_MIN: 10
+      uses: tete1030/safe-debugger-action@dev
+
+    - name: Prepare config file
+      if: env.SKIP_TARGET == '0'
+      run: scripts/cisteps/build-openwrt/09-prepare_config.sh
+
+    - name: Download packages
+      if: env.SKIP_TARGET == '0'
+      run: scripts/cisteps/build-openwrt/10-download_packages.sh
+
+    - name: Print disk space
+      if: env.SKIP_TARGET == '0'
       run: df -h
 
-    - name: Compile
-      run: |
-        . docker.sh
-        build_image compile
-        echo "::set-env name=STATE_LAST_BUILD_STAGE::compile"
+    - name: Compile firmware and packages with multiple threads
+      id: mtcompile
+      if: env.SKIP_TARGET == '0'
+      continue-on-error: true
+      run: scripts/cisteps/build-openwrt/11-compile_multi.sh
 
-    - name: Print disk space size
+    - name: Compile firmware and packages with single threads when failed
+      if: env.SKIP_TARGET == '0' && steps.mtcompile.outputs.started == '1' && steps.mtcompile.outputs.status != 'success'
+      run: scripts/cisteps/build-openwrt/12-compile_single.sh
+
+    - name: Print disk space
+      if: env.SKIP_TARGET == '0'
       run: df -h
 
-    - name: Push image and cache
+    # failure checking
+    - name: '[Failure/Debug] Wait for SSH connection (timeout 10min)'
       if: |
-        !cancelled() && (
-          success() ||
-          github.event.client_payload.push_when_fail == true ||
-          github.event.deployment.payload.push_when_fail == true
+        env.SKIP_TARGET == '0' && !cancelled()
+        && (job.status == 'failure' || (env.OPT_DEBUG == '1' && env.TEST != '1'))
+      env:
+        TMATE_DOCKER_CONTAINER: ${{env.BUILDER_CONTAINER_ID}}
+        TIMEOUT_MIN: 10
+      uses: tete1030/safe-debugger-action@dev
+
+    - name: Upload builder
+      if: |
+        env.SKIP_TARGET == '0' && !cancelled() && (
+          job.status == 'success'
+          || env.OPT_PUSH_WHEN_FAIL == '1'
         )
-      run: |
-        . docker.sh
-        push_image_and_cache
+      run: scripts/cisteps/build-openwrt/13-upload_builder.sh
 
-    - name: Copy out bin directory
-      id: copydir
-      if: (!cancelled())
-      run: |
-        . docker.sh
-        if [ ! -d "$(pwd)/openwrt" ]; then
-          mkdir "$(pwd)/openwrt"
-        fi
-        copy_files /home/builder/openwrt/bin "$(pwd)/openwrt/bin"
-        echo "::set-output name=status::success"
-
-    - name: Upload bin directory
-      uses: actions/upload-artifact@master
-      if: steps.copydir.outputs.status == 'success' && !cancelled()
-      with:
-        name: OpenWrt_bin
-        path: openwrt/bin
+    # - name: Upload bin directory
+    #   uses: actions/upload-artifact@master
+    #   if: env.SKIP_TARGET == '0' && !cancelled()
+    #   with:
+    #     name: OpenWrt_bin_${{env.BUILD_TARGET}}
+    #     path: ${{env.HOST_BIN_DIR}}
 
     - name: Organize files
-      if: steps.copydir.outputs.status == 'success' && !cancelled()
-      run: |
-        cd openwrt/bin/targets/*/*
-        rm -rf packages
-        echo "::set-env name=FIRMWARE::$(pwd)"
+      id: organize
+      if: env.SKIP_TARGET == '0' && !cancelled()
+      run: scripts/cisteps/build-openwrt/14-organize_files.sh
 
     - name: Upload firmware
       uses: actions/upload-artifact@master
-      if: steps.copydir.outputs.status == 'success' && success() && !cancelled()
+      if: env.SKIP_TARGET == '0' && env.TEST != '1' && env.OPT_PACKAGE_ONLY != '1' && steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_firmware
-        path: ${{ env.FIRMWARE }}
-
-    # failure checking
-    - name: SSH connection to Actions
-      if: |
-        failure() ||
-        github.event.client_payload.debug == true ||
-        github.event.deployment.payload.debug == true
-      uses: tete1030/debugger-action@my
-
-  docker-build-inc:
-    runs-on: ubuntu-18.04
-    if: | 
-      github.event_name == 'push' || (
-        github.event_name == 'repository_dispatch' && 
-        github.event.action == 'docker-build-inc'
-      ) || (
-        github.event_name == 'deployment' && 
-        github.event.deployment.task == 'docker-build-inc'
-      )
-    name: ${{matrix.title}}
-    strategy:
-      fail-fast: true
-      matrix:
-        mode: [normal, test]
-        include:
-        - mode: normal
-          title: docker-build-inc
-        - mode: test
-          title: test-docker-build-inc
-    env:
-      # Not recommended to change as they are already in optimal condition
-      # 不推荐修改，已处在最优状态
-      # Using docker driver instead of docker-container because we don't need cache
-      # 由于不需要缓存，这里使用docker而非docker-container
-      DK_BUILDX_DRIVER: docker
-      DK_DOCKERFILE: Dockerfile-inc
-      NO_REMOTE_CACHE: 1
-      NO_BUILDTIME_PUSH: 1
-      BUILD_ARGS: 'CONFIG_FILE IMAGE_BASE UPDATE_REPO UPDATE_FEEDS'
-
-    steps:
-    - name: Checkout
-      uses: actions/checkout@master
-
-    - name: Init test env
-      if: matrix.mode == 'test'
-      run: |
-        echo "::set-env name=DK_DOCKERFILE::tests/${DK_DOCKERFILE}"
-        echo "::set-env name=BUILDER_TAG::test-${BUILDER_TAG}"
-        echo "::set-env name=TEST::1"
-
-    - name: Init build env
-      run: |
-        # set-env command does not export env for current shell
-        export IMAGE_NAME="${DK_USERNAME}/${BUILDER_NAME}"
-        export IMAGE_TAG=${BUILDER_TAG}-inc
-        echo "::set-env name=IMAGE_NAME::${IMAGE_NAME}"
-        echo "::set-env name=IMAGE_TAG::${IMAGE_TAG}"
-        echo "::set-env name=IMAGE_BASE::${DK_REGISTRY:+$DK_REGISTRY/}${IMAGE_NAME}:${IMAGE_TAG}"
-        echo "::set-env name=IMAGE_LATEST::${DK_REGISTRY:+$DK_REGISTRY/}${IMAGE_NAME}:${BUILDER_TAG}"
-
-        UPDATE_FEEDS=0
-        [ "x${{ github.event.client_payload.update_feeds || github.event.deployment.payload.update_feeds }}" != "xtrue" ] || UPDATE_FEEDS=1
-        echo "::set-env name=UPDATE_FEEDS::${UPDATE_FEEDS}"
-        UPDATE_REPO=0
-        [ "x${{ github.event.client_payload.update_repo || github.event.deployment.payload.update_repo }}" != "xtrue" ] || UPDATE_REPO=1
-        echo "::set-env name=UPDATE_REPO::${UPDATE_REPO}"
-
-        scripts/cleanup.sh
-
-    - name: Set up Docker Buildx
-      id: buildx
-      uses: crazy-max/ghaction-docker-buildx@v1
-      with:
-        version: latest
-
-    - name: Configure docker
-      run: |
-        . docker.sh
-        configure_docker
-        login_to_registry
-
-    - name: Check if use latest base image
-      env:
-        BOOL_USE_LATEST: ${{ github.event.client_payload.use_latest || github.event.deployment.payload.use_latest }}
-      run: |
-        . docker.sh
-        set +eo pipefail
-        docker buildx imagetools inspect "${IMAGE_BASE}"
-        ret_val=$?
-        set -eo pipefail
-        if [ "x${BOOL_USE_LATEST}" = "xtrue" -o "x${ret_val}" != "x0" ]; then
-          echo "Creating '${IMAGE_BASE}' from '${IMAGE_LATEST}'"
-          create_remote_tag_alias "${IMAGE_LATEST}" "${IMAGE_BASE}"
-        fi
-
-    - name: Pull base image
-      run: |
-        . docker.sh
-        pull_image
-
-    # Allow intermediate customization
-    - name: SSH connection to Actions
-      if: github.event.client_payload.debug == true || github.event.deployment.payload.debug == true
-      env:
-        TIMEOUT_MIN: 5
-      uses: tete1030/debugger-action@my
-
-    - name: Update repo and packages
-      run: |
-        . docker.sh
-        build_image updateclone
-        echo "::set-env name=STATE_LAST_BUILD_STAGE::updateclone"
-
-    - name: Apply customizations
-      run: |
-        . docker.sh
-        build_image custom
-        echo "::set-env name=STATE_LAST_BUILD_STAGE::custom"
-
-    - name: Download package
-      run: |
-        . docker.sh
-        build_image download
-        echo "::set-env name=STATE_LAST_BUILD_STAGE::download"
-
-    - name: Print disk space size
-      run: df -h
-
-    - name: Compile
-      run: |
-        . docker.sh
-        build_image compile
-        echo "::set-env name=STATE_LAST_BUILD_STAGE::compile"
-
-    - name: Print disk space size
-      run: df -h
-
-    - name: Push image
-      if: |
-        !cancelled() && (
-          success() ||
-          github.event.client_payload.push_when_fail == true ||
-          github.event.deployment.payload.push_when_fail == true
-        )
-      run: |
-        . docker.sh
-        push_image
-
-    - name: Copy out bin directory
-      id: copydir
-      if: (!cancelled())
-      run: |
-        . docker.sh
-        if [ ! -d "$(pwd)/openwrt" ]; then
-          mkdir "$(pwd)/openwrt"
-        fi
-        copy_files /home/builder/openwrt/bin "$(pwd)/openwrt/bin"
-        echo "::set-output name=status::success"
-
-    - name: Upload bin directory
-      uses: actions/upload-artifact@master
-      if: steps.copydir.outputs.status == 'success' && !cancelled()
-      with:
-        name: OpenWrt_bin
-        path: openwrt/bin
-
-    - name: Organize files
-      if: steps.copydir.outputs.status == 'success' && !cancelled()
-      run: |
-        cd openwrt/bin/targets/*/*
-        rm -rf packages
-        echo "::set-env name=FIRMWARE::$(pwd)"
-  
-    - name: Upload firmware
-      uses: actions/upload-artifact@master
-      if: steps.copydir.outputs.status == 'success' && success() && !cancelled()
-      with:
-        name: OpenWrt_firmware
-        path: ${{ env.FIRMWARE }}
-
-    # failure checking
-    - name: SSH connection to Actions
-      if: |
-        failure() ||
-        github.event.client_payload.debug == true ||
-        github.event.deployment.payload.debug == true
-      uses: tete1030/debugger-action@my
-
-  docker-build-package:
-    runs-on: ubuntu-18.04
-    if: |
-      github.event_name == 'push' || (
-        github.event_name == 'repository_dispatch' && 
-        github.event.action == 'docker-build-package'
-      ) || (
-        github.event_name == 'deployment' && 
-        github.event.deployment.task == 'docker-build-package'
-      )
-    name: ${{matrix.title}}
-    strategy:
-      fail-fast: true
-      matrix:
-        mode: [normal, test]
-        include:
-        - mode: normal
-          title: docker-build-package
-        - mode: test
-          title: test-docker-build-package
-    env:
-      # Not recommended to change as they are already in optimal condition
-      # 不推荐修改，已处在最优状态
-      # Using docker driver instead of docker-container because we don't need cache
-      # 由于不需要缓存，这里使用docker而非docker-container
-      DK_BUILDX_DRIVER: docker
-      DK_DOCKERFILE: Dockerfile-package
-      NO_REMOTE_CACHE: 1
-      NO_BUILDTIME_PUSH: 1
-      BUILD_ARGS: 'CONFIG_FILE IMAGE_BASE UPDATE_FEEDS'
-
-    steps:
-    - name: Checkout
-      uses: actions/checkout@master
-
-    - name: Init test env
-      if: matrix.mode == 'test'
-      run: |
-        echo "::set-env name=DK_DOCKERFILE::tests/${DK_DOCKERFILE}"
-        echo "::set-env name=BUILDER_TAG::test-${BUILDER_TAG}"
-        echo "::set-env name=TEST::1"
-
-    - name: Init build env
-      run: |
-        # set-env command does not export env for current shell
-        export IMAGE_NAME="${DK_USERNAME}/${BUILDER_NAME}"
-        export IMAGE_TAG=${BUILDER_TAG}-package
-        echo "::set-env name=IMAGE_NAME::${IMAGE_NAME}"
-        echo "::set-env name=IMAGE_TAG::${IMAGE_TAG}"
-        echo "::set-env name=IMAGE_BASE::${DK_REGISTRY:+$DK_REGISTRY/}${IMAGE_NAME}:${IMAGE_TAG}"
-        echo "::set-env name=IMAGE_LATEST::${DK_REGISTRY:+$DK_REGISTRY/}${IMAGE_NAME}:${BUILDER_TAG}"
-        echo "::set-env name=IMAGE_LATEST_INC::${DK_REGISTRY:+$DK_REGISTRY/}${IMAGE_NAME}:${BUILDER_TAG}-inc"
-
-        UPDATE_FEEDS=0
-        [ "x${{ github.event.client_payload.update_feeds || github.event.deployment.payload.update_feeds }}" != "xtrue" ] || UPDATE_FEEDS=1
-        echo "::set-env name=UPDATE_FEEDS::${UPDATE_FEEDS}"
-
-        scripts/cleanup.sh
-
-    - name: Set up Docker Buildx
-      id: buildx
-      uses: crazy-max/ghaction-docker-buildx@v1
-      with:
-        version: latest
-
-    - name: Configure docker
-      run: |
-        . docker.sh
-        configure_docker
-        login_to_registry
-        touch .start_timestamp
-
-    - name: Check if use latest base image
-      env:
-        BOOL_USE_LATEST: ${{ github.event.client_payload.use_latest || github.event.deployment.payload.use_latest }}
-        BOOL_USE_LATEST_INC: ${{ github.event.client_payload.use_latest_inc || github.event.deployment.payload.use_latest_inc }}
-      run: |
-        . docker.sh
-        set +eo pipefail
-        docker buildx imagetools inspect "${IMAGE_BASE}"
-        ret_val=$?
-        set -eo pipefail
-        if [ "x${BOOL_USE_LATEST}" = "xtrue" -o "x${BOOL_USE_LATEST_INC}" = "xtrue" -o "x${ret_val}" != "x0" ]; then
-          IMAGE_SELECTED="${IMAGE_LATEST}"
-          if [ "x${BOOL_USE_LATEST_INC}" = "xtrue" ]; then
-            if [ "x${BOOL_USE_LATEST}" = "xtrue" ]; then
-              echo "You cannot use both 'use_latest' and 'use_latest_inc'" >&2
-              exit 1
-            fi
-            IMAGE_SELECTED="${IMAGE_LATEST_INC}"
-          fi
-          echo "Creating '${IMAGE_BASE}' from '${IMAGE_SELECTED}'"
-          create_remote_tag_alias "${IMAGE_SELECTED}" "${IMAGE_BASE}"
-        fi
-
-    - name: Pull base image
-      run: |
-        . docker.sh
-        pull_image
-
-    # Allow intermediate customization
-    - name: SSH connection to Actions
-      if: github.event.client_payload.debug == true || github.event.deployment.payload.debug == true
-      env:
-        TIMEOUT_MIN: 5
-      uses: tete1030/debugger-action@my
-
-    - name: Update repo and packages
-      run: |
-        . docker.sh
-        build_image updateclone
-        echo "::set-env name=STATE_LAST_BUILD_STAGE::updateclone"
-
-    - name: Apply customizations
-      run: |
-        . docker.sh
-        build_image custom
-        echo "::set-env name=STATE_LAST_BUILD_STAGE::custom"
-
-    - name: Download package
-      run: |
-        . docker.sh
-        build_image download
-        echo "::set-env name=STATE_LAST_BUILD_STAGE::download"
-
-    - name: Print disk space size
-      run: df -h
-
-    - name: Compile
-      run: |
-        . docker.sh
-        build_image compile
-        echo "::set-env name=STATE_LAST_BUILD_STAGE::compile"
-
-    - name: Print disk space size
-      run: df -h
-
-    - name: Push image
-      if: (!cancelled()) && (success() || github.event.client_payload.push_when_fail == true || github.event.deployment.payload.push_when_fail == true)
-      run: |
-        . docker.sh
-        push_image
-
-    - name: Copy out bin directory
-      id: copydir
-      if: (!cancelled())
-      run: |
-        . docker.sh
-        if [ ! -d "$(pwd)/openwrt" ]; then
-          mkdir "$(pwd)/openwrt"
-        fi
-        copy_files /home/builder/openwrt/bin "$(pwd)/openwrt/bin"
-        echo "::set-output name=status::success"
-
-    - name: Remove firmware
-      if: steps.copydir.outputs.status == 'success' && !cancelled()
-      run: |
-        shopt -s extglob
-        cd openwrt/bin/targets/*/*
-        all_extra_files=( !(packages) )
-        rm -rf "${all_extra_files[@]}"
+        name: OpenWrt_firmware_${{env.BUILD_TARGET}}
+        path: openwrt_firmware
 
     - name: Upload packages
       uses: actions/upload-artifact@master
-      if: steps.copydir.outputs.status == 'success' && !cancelled()
+      if: env.SKIP_TARGET == '0' && env.TEST != '1' && steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_packages
-        path: openwrt/bin
-
-    - name: Remove old packages
-      if: steps.copydir.outputs.status == 'success' && !cancelled()
-      run: |
-        cd openwrt/bin/targets/*/*
-        find . -type f -not -newer ../../../../../.start_timestamp -exec rm -f {} \;
-
-    - name: Upload new packages
-      uses: actions/upload-artifact@master
-      if: steps.copydir.outputs.status == 'success' && !cancelled()
-      with:
-        name: OpenWrt_new_packages
-        path: openwrt/bin
+        name: OpenWrt_packages_${{env.BUILD_TARGET}}
+        path: ${{env.HOST_BIN_DIR}}
 
     # failure checking
-    - name: SSH connection to Actions
-      if: failure() || github.event.client_payload.debug == true || github.event.deployment.payload.debug == true
-      uses: tete1030/debugger-action@my
-
-  direct-build:
-    runs-on: ubuntu-18.04
-    if: (
-        github.event_name == 'repository_dispatch' &&
-        github.event.action == 'direct-build'
-      ) || (
-        github.event_name == 'deployment' &&
-        github.event.deployment.task == 'direct-build'
-      )
-    steps:
-    - name: Checkout
-      uses: actions/checkout@master
-
-    - name: Initialize environment
-      run: |
-        scripts/cleanup.sh
-        scripts/initenv.sh
-
-    - name: Clone all source code
-      env: 
-        REPO_URL: https://github.com/coolsnowwolf/lede
-        REPO_BRANCH: master
-      run:
-        scripts/update_repo.sh
-        UPDATE_FEEDS=1 scripts/update_feeds.sh
-
-    - name: Load custom configuration
-      run: scripts/customize.sh
-
-    # Allow intermediate customization
-    - name: SSH connection to Actions
-      if: github.event.client_payload.debug == true || github.event.deployment.payload.debug == true
+    - name: '[Failure/Debug] wait for SSH connection (timeout 10min. You are safe to cancel the job now.)'
       env:
-        TIMEOUT_MIN: 5
-      uses: tete1030/debugger-action@my
-
-    - name: Download package
-      run: scripts/download.sh
-
-    - name: Print disk space size
-      run: df -h
-
-    - name: Multi-thread compile
-      id: mtcompile
-      continue-on-error: true
-      run: |
-        echo "::set-output name=started::yes"
-        scripts/compile.sh m
-        echo "::set-output name=success::yes"
-
-    # previous failure will cause current job failure
-    - name: Single-thread compile
-      if: steps.mtcompile.outputs.started == 'yes' && steps.mtcompile.outputs.success != 'yes'
-      run: scripts/compile.sh s
-
-    - name: Print disk space size
-      run: df -h
-
-    - name: Upload bin directory
-      uses: actions/upload-artifact@master
-      if: (!cancelled())
-      with:
-        name: OpenWrt_bin
-        path: openwrt/bin
-
-    - name: Organize files
-      if: (!cancelled())
-      run: |
-        cd openwrt/bin/targets/*/*
-        rm -rf packages
-        echo "::set-env name=FIRMWARE::$(pwd)"
-
-    - name: Upload firmware
-      uses: actions/upload-artifact@master
-      if: (success() && !cancelled())
-      with:
-        name: OpenWrt_firmware
-        path: ${{ env.FIRMWARE }}
-
-    # failure checking
-    - name: SSH connection to Actions
-      if: failure() || github.event.client_payload.debug == true || github.event.deployment.payload.debug == true
-      uses: tete1030/debugger-action@my
-
-# Base
-# * +mentohust
-# * -shadowsocksr
-# * -unblockmusic
-# * -v2ray
-# * -samba +samba4
-# * -adbyby
-# * -xlnetacc
-# * -mia
-# * -wifi_schedule
-# * -kms
-# * -zerotier
-# * +dockerce
-# * +curl
-# * +wget
-
-# Install
-# * autossh
-# * openclash
-# * fping
-# * netdata
-# * zsh
-# * tcpdump
-# * dmesg
-# * tmux
-# * vim-full
-# * strace
-# * htop
-
-# Change source
-# * Upgrade download_pl
-# * Add mentohust
-# * autossh.init
-# * transmission init.d
-# * netdata init.d upgrade
-# * netdata makefile upgrade for 1.19
-# * Add libJudy for netdata
-# * netdata add go.d.plugin
-# * openclash replace clashr
-# 
+        TIMEOUT_MIN: 10
+      if: |
+        env.SKIP_TARGET == '0' && !cancelled()
+        && (job.status == 'failure' || (env.OPT_DEBUG == '1' && env.TEST != '1'))
+      uses: tete1030/safe-debugger-action@dev
